@@ -216,13 +216,16 @@ async function sendDailyMessage() {
   }
   
   const messageToSend = unsentMessages[0];
-  const smsEmail = phoneToSmsEmail(config.phoneNumber, config.carrier);
+  
+  // Check if phoneNumber is an email or phone number
+  const isEmail = config.phoneNumber.includes('@');
+  const recipient = isEmail ? config.phoneNumber : phoneToSmsEmail(config.phoneNumber, config.carrier);
   
   try {
-    console.log(`📤 Sending message to ${smsEmail}...`);
+    console.log(`📤 Sending message to ${recipient}...`);
     
     // Send via Resend
-    const result = await sendEmailViaResend(smsEmail, messageToSend.text);
+    const result = await sendEmailViaResend(recipient, messageToSend.text);
     
     console.log('✅ Message sent successfully!', result.id);
     
