@@ -1,26 +1,32 @@
 const express = require('express');
 const cors = require('cors');
-const twilio = require('twilio');
 const cron = require('node-cron');
 const fs = require('fs').promises;
 const path = require('path');
+const nodemailer = require('nodemailer');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 // Environment variables
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER;
+const EMAIL_SERVICE = process.env.EMAIL_SERVICE || 'gmail'; // gmail, outlook, etc.
+const EMAIL_USER = process.env.EMAIL_USER; // your email
+const EMAIL_PASS = process.env.EMAIL_PASS; // your email password or app password
 
-// Initialize Twilio client only if credentials are provided
-let client = null;
-if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
-  client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-  console.log('✅ Twilio client initialized');
+// Initialize email transporter
+let transporter = null;
+if (EMAIL_USER && EMAIL_PASS) {
+  transporter = nodemailer.createTransport({
+    service: EMAIL_SERVICE,
+    auth: {
+      user: EMAIL_USER,
+      pass: EMAIL_PASS
+    }
+  });
+  console.log('✅ Email transporter initialized');
 } else {
-  console.log('⚠️  Twilio credentials not found - SMS sending will not work');
+  console.log('⚠️  Email credentials not found - SMS sending will not work');
 }
 
 // Data file paths
@@ -32,7 +38,20 @@ const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 let messages = [];
 let config = {
   phoneNumber: '',
-  sendTime: '12:00'
+  sendTime: '12:00',
+  carrier: 'att' // Default to AT&T
+};
+
+// Carrier to SMS email mapping
+const CARRIER_DOMAINS = {
+  'att': 'txt.att.net',
+  'verizon': 'vtext.com',
+  'tmobile': 'tmomail.net',
+  'sprint': 'messaging.sprintpcs.com',
+  'uscellular': 'email.uscc.net',
+  'boost': 'sms.myboostmobile.com',
+  'cricket': 'sms.cricketwireless.net',
+  'metropcs': 'mymetropcs.com'
 };
 
 // Initialize data directory and files
@@ -82,11 +101,19 @@ async function saveConfig() {
   }
 }
 
+// Convert phone number to SMS email address
+function phoneToSmsEmail(phoneNumber, carrier) {
+  // Remove +1 and any non-digits
+  const cleanNumber = phoneNumber.replace(/\D/g, '').replace(/^1/, '');
+  const domain = CARRIER_DOMAINS[carrier] || CARRIER_DOMAINS.att;
+  return `${cleanNumber}@${domain}`;
+}
+
 // API Routes
 app.get('/', (req, res) => {
   res.json({ 
     status: 'Server is running!',
-    twilioConfigured: !!client,
+    emailConfigured: !!transporter,
     messagesCount: messages.length,
     config: config
   });
@@ -102,7 +129,8 @@ app.post('/api/config', async (req, res) => {
   try {
     config = {
       phoneNumber: req.body.phoneNumber,
-      sendTime: req.body.sendTime || '12:00'
+      sendTime: req.body.sendTime || '12:00',
+      carrier: req.body.carrier || 'att'
     };
     await saveConfig();
     console.log('✅ Config updated:', config);
@@ -162,9 +190,9 @@ async function sendDailyMessage() {
     return { success: false, message: 'No messages queued' };
   }
   
-  if (!client) {
-    console.log('❌ Twilio not configured - cannot send SMS');
-    return { success: false, message: 'Twilio not configured' };
+  if (!transporter) {
+    console.log('❌ Email not configured - cannot send SMS');
+    return { success: false, message: 'Email not configured' };
   }
   
   if (!config.phoneNumber) {
@@ -173,25 +201,27 @@ async function sendDailyMessage() {
   }
   
   const messageToSend = unsentMessages[0];
+  const smsEmail = phoneToSmsEmail(config.phoneNumber, config.carrier);
   
   try {
-    console.log(`📤 Sending message to ${config.phoneNumber}...`);
+    console.log(`📤 Sending message to ${smsEmail}...`);
     
-    // Send via Twilio
-    const twilioMessage = await client.messages.create({
-      body: messageToSend.text,
-      from: TWILIO_PHONE_NUMBER,
-      to: config.phoneNumber
+    // Send via email-to-SMS
+    await transporter.sendMail({
+      from: EMAIL_USER,
+      to: smsEmail,
+      subject: '', // Empty subject for cleaner SMS
+      text: messageToSend.text
     });
     
-    console.log('✅ Message sent successfully!', twilioMessage.sid);
+    console.log('✅ Message sent successfully!');
     
     // Mark as sent
     messageToSend.sent = true;
     messageToSend.sentAt = new Date().toISOString();
     await saveMessages();
     
-    return { success: true, message: 'Message sent!', sid: twilioMessage.sid };
+    return { success: true, message: 'Message sent!' };
     
   } catch (error) {
     console.error('❌ Error sending message:', error);
@@ -231,7 +261,7 @@ app.post('/api/send-now', async (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'healthy',
-    twilioConfigured: !!client,
+    emailConfigured: !!transporter,
     messagesQueued: messages.filter(m => !m.sent).length,
     messagesSent: messages.filter(m => m.sent).length,
     config: config
@@ -248,7 +278,7 @@ async function start() {
   app.listen(PORT, () => {
     console.log('='.repeat(50));
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`📱 Twilio configured: ${client ? 'Yes' : 'No'}`);
+    console.log(`📧 Email configured: ${transporter ? 'Yes' : 'No'}`);
     console.log(`📊 Messages loaded: ${messages.length}`);
     console.log(`⏰ Send time: ${config.sendTime}`);
     console.log('='.repeat(50));
