@@ -3,30 +3,21 @@ const cors = require('cors');
 const cron = require('node-cron');
 const fs = require('fs').promises;
 const path = require('path');
-const nodemailer = require('nodemailer');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 // Environment variables
-const EMAIL_SERVICE = process.env.EMAIL_SERVICE || 'gmail'; // gmail, outlook, etc.
-const EMAIL_USER = process.env.EMAIL_USER; // your email
-const EMAIL_PASS = process.env.EMAIL_PASS; // your email password or app password
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const FROM_EMAIL = process.env.FROM_EMAIL || 'onboarding@resend.dev'; // Resend provides this default
 
-// Initialize email transporter
-let transporter = null;
-if (EMAIL_USER && EMAIL_PASS) {
-  transporter = nodemailer.createTransport({
-    service: EMAIL_SERVICE,
-    auth: {
-      user: EMAIL_USER,
-      pass: EMAIL_PASS
-    }
-  });
-  console.log('✅ Email transporter initialized');
+// Check if Resend is configured
+const resendConfigured = !!RESEND_API_KEY;
+if (resendConfigured) {
+  console.log('✅ Resend API configured');
 } else {
-  console.log('⚠️  Email credentials not found - SMS sending will not work');
+  console.log('⚠️  Resend API key not found - SMS sending will not work');
 }
 
 // Data file paths
@@ -39,7 +30,7 @@ let messages = [];
 let config = {
   phoneNumber: '',
   sendTime: '12:00',
-  carrier: 'att' // Default to AT&T
+  carrier: 'att'
 };
 
 // Carrier to SMS email mapping
@@ -109,11 +100,35 @@ function phoneToSmsEmail(phoneNumber, carrier) {
   return `${cleanNumber}@${domain}`;
 }
 
+// Send email via Resend
+async function sendEmailViaResend(to, text) {
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${RESEND_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      from: FROM_EMAIL,
+      to: to,
+      subject: '',
+      text: text
+    })
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Resend API error: ${error}`);
+  }
+
+  return await response.json();
+}
+
 // API Routes
 app.get('/', (req, res) => {
   res.json({ 
     status: 'Server is running!',
-    emailConfigured: !!transporter,
+    resendConfigured: resendConfigured,
     messagesCount: messages.length,
     config: config
   });
@@ -190,9 +205,9 @@ async function sendDailyMessage() {
     return { success: false, message: 'No messages queued' };
   }
   
-  if (!transporter) {
-    console.log('❌ Email not configured - cannot send SMS');
-    return { success: false, message: 'Email not configured' };
+  if (!resendConfigured) {
+    console.log('❌ Resend not configured - cannot send SMS');
+    return { success: false, message: 'Resend not configured' };
   }
   
   if (!config.phoneNumber) {
@@ -206,22 +221,17 @@ async function sendDailyMessage() {
   try {
     console.log(`📤 Sending message to ${smsEmail}...`);
     
-    // Send via email-to-SMS
-    await transporter.sendMail({
-      from: EMAIL_USER,
-      to: smsEmail,
-      subject: '', // Empty subject for cleaner SMS
-      text: messageToSend.text
-    });
+    // Send via Resend
+    const result = await sendEmailViaResend(smsEmail, messageToSend.text);
     
-    console.log('✅ Message sent successfully!');
+    console.log('✅ Message sent successfully!', result.id);
     
     // Mark as sent
     messageToSend.sent = true;
     messageToSend.sentAt = new Date().toISOString();
     await saveMessages();
     
-    return { success: true, message: 'Message sent!' };
+    return { success: true, message: 'Message sent!', id: result.id };
     
   } catch (error) {
     console.error('❌ Error sending message:', error);
@@ -261,7 +271,7 @@ app.post('/api/send-now', async (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'healthy',
-    emailConfigured: !!transporter,
+    resendConfigured: resendConfigured,
     messagesQueued: messages.filter(m => !m.sent).length,
     messagesSent: messages.filter(m => m.sent).length,
     config: config
@@ -278,7 +288,7 @@ async function start() {
   app.listen(PORT, () => {
     console.log('='.repeat(50));
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`📧 Email configured: ${transporter ? 'Yes' : 'No'}`);
+    console.log(`📧 Resend configured: ${resendConfigured ? 'Yes' : 'No'}`);
     console.log(`📊 Messages loaded: ${messages.length}`);
     console.log(`⏰ Send time: ${config.sendTime}`);
     console.log('='.repeat(50));
